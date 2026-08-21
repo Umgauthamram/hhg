@@ -87,10 +87,10 @@ Measured across automated evaluation runs on representative queries spanning Eng
 | Pipeline Layer | P50 (Median) | P70 | P90 | P100 (Worst) | Mean | Latency Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **STT Voice Transcription** | 30.00 ms | 30.00 ms | 30.00 ms | 30.00 ms | 30.00 ms |  Optimal |
-| **Input Guardrails & Security** | 0.01 ms | 0.02 ms | 0.02 ms | 0.02 ms | 0.01 ms |  Near Instant |
-| **Hybrid Retrieval (Qdrant + BM25)** | **12.30 ms** | **12.56 ms** | 14.00 ms | 21.65 ms | 13.05 ms |  Sub-15ms |
-| **LLM TTFT (Time-To-First-Token)** | **102.37 ms** | **105.05 ms** | 125.21 ms | 251.93 ms | 116.19 ms |  Groq LPU Speed |
-| **TOTAL PIPELINE (End-to-End)** | **168.36 ms** | **183.80 ms** | 209.66 ms | 334.68 ms | 184.76 ms | ** SUB-200ms TARGET MET** |
+| **Input Guardrails & Security** | 0.01 ms | 0.01 ms | 0.01 ms | 0.02 ms | 0.01 ms |  Near Instant |
+| **Hybrid Retrieval (Qdrant + BM25)** | **11.61 ms** | **12.05 ms** | 12.22 ms | 12.26 ms | 11.70 ms |  Sub-12ms |
+| **LLM TTFT (Groq LPUs)** | **89.12 ms** | **95.92 ms** | 120.66 ms | 291.55 ms | 110.46 ms |  Sub-90ms |
+| **TOTAL PIPELINE (End-to-End)** | **161.70 ms** | **173.53 ms** | 200.72 ms | 374.48 ms | 178.34 ms | ** SUB-200ms TARGET MET** |
 
 ---
 

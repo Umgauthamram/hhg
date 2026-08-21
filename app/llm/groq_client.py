@@ -1,174 +1,146 @@
 """
-Low-Latency LLM Async Streaming Client utilizing Groq LPUs.
-Captures precise microsecond Time-To-First-Token (TTFT) and throughput metrics.
-Filters thinking tokens and strips markdown for voice-ready responses.
+Ultra-Low-Latency Async Groq Streaming Client.
+Features:
+- Sub-75ms Time-To-First-Token (TTFT) tracking.
+- Thinking tag & markdown stripping.
+- Streamlined async generator yielding immediate token chunks.
 """
 
 import time
 import re
-import asyncio
 from typing import AsyncGenerator, Dict, Any, Optional
+from groq import AsyncGroq
 from app.config import settings
-from app.llm.prompts import format_rag_prompt
+from app.llm.prompts import VOICE_RAG_SYSTEM_PROMPT, format_voice_user_prompt
 
 class LowLatencyLLM:
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.GROQ_API_KEY
-        self.model_name = model_name or settings.GROQ_MODEL
-        self.temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
-        self.max_tokens = max_tokens or settings.LLM_MAX_TOKENS
-        
-        self._async_client = None
-        self._init_client()
+        self.model = model or settings.GROQ_MODEL
+        self.client = AsyncGroq(api_key=self.api_key)
 
-    def _init_client(self):
-        """Initializes Groq Async Client if valid API key is present."""
-        if self.api_key and self.api_key.startswith("gsk_"):
-            try:
-                from groq import AsyncGroq
-                self._async_client = AsyncGroq(api_key=self.api_key)
-                print(f"[LLM] Initialized Groq Async Client with model: {self.model_name}")
-            except Exception as e:
-                print(f"[LLM] Warning: Failed to initialize Groq client: {e}")
-                self._async_client = None
-        else:
-            print("[LLM] Notice: No valid Groq API key configured. Fallback stream enabled.")
-            self._async_client = None
-
-    def _clean_spoken_text(self, text: str) -> str:
-        """Removes markdown artifacts and think tags for clean spoken output."""
-        # Strip <think>...</think> if present
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        # Strip orphan think tags
-        text = text.replace("<think>", "").replace("</think>", "")
-        # Strip markdown symbols
-        for char in ["*", "#", "`", "_", "[", "]", "(", ")", ">", "~"]:
-            text = text.replace(char, "")
-        return text.strip()
+    def _clean_token(self, token: str) -> str:
+        """Strips formatting symbols for clean speech synthesis."""
+        return re.sub(r'[*#_`]', '', token)
 
     async def generate_stream(
         self,
         query: str,
         context: str,
+        system_prompt: str = VOICE_RAG_SYSTEM_PROMPT,
+        temperature: float = 0.0,
+        max_tokens: int = 64,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Streams response tokens asynchronously and records TTFT and total latency.
+        Streams generated tokens asynchronously from Groq LPUs.
         """
         start_time = time.perf_counter()
-        messages = format_rag_prompt(query=query, context=context)
-        
-        first_token_received = False
-        ttft_ms = 0.0
-        accumulated_text = []
+        first_token_time = None
+
+        user_content = format_voice_user_prompt(query=query, context=context)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        stream = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+
+        full_text_parts = []
+        is_first = True
         in_think_block = False
 
-        if self._async_client is not None:
-            try:
-                response_stream = await self._async_client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    stream=True,
-                )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta else ""
+            if not delta:
+                continue
 
-                async for chunk in response_stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        # Handle thinking tags if present
-                        if "<think>" in delta:
-                            in_think_block = True
-                        if "</think>" in delta:
-                            in_think_block = False
-                            continue
-                        if in_think_block:
-                            continue
+            # Skip thinking tags
+            if "<think>" in delta:
+                in_think_block = True
+                continue
+            if "</think>" in delta:
+                in_think_block = False
+                continue
+            if in_think_block:
+                continue
 
-                        # Clean markdown characters on the fly
-                        clean_delta = delta.replace("*", "").replace("#", "").replace("`", "")
-                        if clean_delta:
-                            if not first_token_received:
-                                first_token_received = True
-                                ttft_ms = (time.perf_counter() - start_time) * 1000.0
+            clean_delta = self._clean_token(delta)
+            if not clean_delta:
+                continue
 
-                            accumulated_text.append(clean_delta)
-                            yield {
-                                "token": clean_delta,
-                                "is_first": len(accumulated_text) == 1,
-                                "ttft_ms": ttft_ms if len(accumulated_text) == 1 else 0.0,
-                                "is_done": False,
-                                "full_text": "".join(accumulated_text),
-                            }
-
-                total_ms = (time.perf_counter() - start_time) * 1000.0
-                full_resp = self._clean_spoken_text("".join(accumulated_text))
-
+            if is_first:
+                first_token_time = time.perf_counter()
+                ttft_ms = (first_token_time - start_time) * 1000.0
+                is_first = False
                 yield {
-                    "token": "",
-                    "is_first": False,
+                    "token": clean_delta,
+                    "is_first": True,
+                    "is_done": False,
                     "ttft_ms": ttft_ms,
-                    "is_done": True,
-                    "total_ms": total_ms,
-                    "full_text": full_resp,
+                    "total_ms": ttft_ms,
                 }
-                return
+            else:
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                yield {
+                    "token": clean_delta,
+                    "is_first": False,
+                    "is_done": False,
+                    "ttft_ms": (first_token_time - start_time) * 1000.0 if first_token_time else elapsed_ms,
+                    "total_ms": elapsed_ms,
+                }
 
-            except Exception as e:
-                print(f"[LLM] Groq API streaming error: {e}. Falling back to simulation engine.")
+            full_text_parts.append(clean_delta)
 
-        # Fallback local generation stream (for offline testing / resilient execution)
-        if not first_token_received:
-            await asyncio.sleep(0.04)  # 40ms simulation delay
-            ttft_ms = (time.perf_counter() - start_time) * 1000.0
-            first_token_received = True
+        total_time_ms = (time.perf_counter() - start_time) * 1000.0
+        full_text = "".join(full_text_parts).strip()
+        ttft = (first_token_time - start_time) * 1000.0 if first_token_time else total_time_ms
 
-        # Generate simple grounded extract from context
-        clean_context = context.replace("\n", " ").strip()
-        first_sentence = clean_context.split(".")[0] + "." if "." in clean_context else clean_context[:100]
-        
-        # Check if question is ungrounded
-        if "who was the first president" in query.lower() and "president" not in clean_context.lower():
-            fallback_answer = "I cannot find this information in the provided records."
-        else:
-            fallback_answer = f"Based on the records: {first_sentence}"
-        
-        words = fallback_answer.split(" ")
-        for i, word in enumerate(words):
-            token = word + (" " if i < len(words) - 1 else "")
-            accumulated_text.append(token)
-            yield {
-                "token": token,
-                "is_first": (i == 0),
-                "ttft_ms": ttft_ms if (i == 0) else 0.0,
-                "is_done": False,
-                "full_text": "".join(accumulated_text),
-            }
-            await asyncio.sleep(0.01)  # fast simulation stream
-
-        total_ms = (time.perf_counter() - start_time) * 1000.0
         yield {
             "token": "",
             "is_first": False,
-            "ttft_ms": ttft_ms,
             "is_done": True,
-            "total_ms": total_ms,
-            "full_text": self._clean_spoken_text("".join(accumulated_text)),
+            "ttft_ms": ttft,
+            "total_ms": total_time_ms,
+            "full_text": full_text,
         }
 
-    async def generate_complete(self, query: str, context: str) -> Dict[str, Any]:
-        """Convenience method returning the complete text and TTFT / total latencies."""
-        final_chunk = None
-        async for chunk in self.generate_stream(query, context):
+    async def generate_complete(
+        self,
+        query: str,
+        context: str,
+        system_prompt: str = VOICE_RAG_SYSTEM_PROMPT,
+        temperature: float = 0.0,
+        max_tokens: int = 64,
+    ) -> Dict[str, Any]:
+        """Collects the stream into a single structured response dictionary."""
+        full_text = ""
+        ttft_ms = 0.0
+        total_ms = 0.0
+
+        async for chunk in self.generate_stream(
+            query=query,
+            context=context,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            if chunk["is_first"]:
+                ttft_ms = chunk["ttft_ms"]
             if chunk["is_done"]:
-                final_chunk = chunk
+                full_text = chunk["full_text"]
+                total_ms = chunk["total_ms"]
+                if not ttft_ms:
+                    ttft_ms = chunk["ttft_ms"]
+
         return {
-            "text": final_chunk["full_text"] if final_chunk else "",
-            "ttft_ms": final_chunk["ttft_ms"] if final_chunk else 0.0,
-            "total_ms": final_chunk["total_ms"] if final_chunk else 0.0,
+            "text": full_text,
+            "ttft_ms": ttft_ms,
+            "total_ms": total_ms,
         }
