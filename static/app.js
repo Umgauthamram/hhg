@@ -1,6 +1,6 @@
 /**
  * Voice-Enabled Sub-200ms RAG - Universal Audio & Voice Streamer.
- * Uses MediaRecorder + Groq Whisper LPU backend STT for universal browser compatibility (Brave, Chrome, Safari, Firefox).
+ * High-quality audio capture + Groq Whisper LPU domain-primed speech recognition.
  */
 
 let ws = null;
@@ -133,7 +133,7 @@ function renderSources(sources) {
   `).join("");
 }
 
-// MediaRecorder Audio Capture
+// MediaRecorder Audio Capture with Noise Suppression
 async function toggleRecording() {
   if (!isRecording) {
     startRecording();
@@ -145,7 +145,14 @@ async function toggleRecording() {
 async function startRecording() {
   try {
     audioChunks = [];
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+    });
     
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioContext.createMediaStreamSource(mediaStream);
@@ -153,13 +160,16 @@ async function startRecording() {
     analyserNode.fftSize = 64;
     source.connect(analyserNode);
 
-    // Initialize MediaRecorder
-    let mimeType = "audio/webm";
-    if (!MediaRecorder.isTypeSupported("audio/webm")) {
-      mimeType = "audio/ogg";
+    // Pick best supported MIME format
+    let mimeType = "audio/webm;codecs=opus";
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = "audio/webm";
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "audio/ogg";
+      }
     }
 
-    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType, audioBitsPerSecond: 64000 });
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         audioChunks.push(e.data);
@@ -175,7 +185,7 @@ async function startRecording() {
     isRecording = true;
     micBtn.classList.add("recording");
     micWrapper.classList.add("recording");
-    voiceStatus.textContent = "🎙️ Listening to your voice... (Click mic button again when done speaking)";
+    voiceStatus.textContent = "🎙️ Listening... Speak clearly, then click the mic button again when done!";
     answerText.textContent = "";
     answerText.style.color = "#f1f5f9";
     cursorBlink.style.display = "inline-block";
@@ -184,7 +194,7 @@ async function startRecording() {
 
   } catch (err) {
     console.error("Microphone access error:", err);
-    voiceStatus.textContent = "Microphone permission required. You can also type your question below.";
+    voiceStatus.textContent = "Microphone access denied. You can type in the box below.";
   }
 }
 
@@ -192,7 +202,7 @@ function stopRecording() {
   isRecording = false;
   micBtn.classList.remove("recording");
   micWrapper.classList.remove("recording");
-  voiceStatus.textContent = "Transcribing voice via Groq Whisper LPU...";
+  voiceStatus.textContent = "Transcribing your voice with Groq Whisper LPU...";
 
   if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();

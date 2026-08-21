@@ -17,9 +17,14 @@ class GroqWhisperSTT(BaseSTT):
         self.model = model
         self.client = AsyncGroq(api_key=self.api_key)
 
-    async def transcribe_audio_bytes(self, audio_bytes: bytes, filename: str = "audio.webm", language: Optional[str] = None) -> Dict[str, Any]:
+    async def transcribe_audio_bytes(
+        self,
+        audio_bytes: bytes,
+        filename: str = "recording.webm",
+        language: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Transcribes audio bytes using Groq Whisper LPU.
+        Transcribes audio bytes using Groq Whisper LPU with dictionary domain prompting.
         """
         start_t = time.perf_counter()
         if not audio_bytes or len(audio_bytes) < 100:
@@ -32,15 +37,19 @@ class GroqWhisperSTT(BaseSTT):
                 "model": self.model,
                 "response_format": "json",
                 "temperature": 0.0,
+                "prompt": "What is a mobile phone? Explain photosynthesis in green plants. What is a corporation? What is a computer? Reserve Bank of India, technology, science, business.",
             }
-            if language and language != "auto":
+            if language and language not in ["auto", ""]:
                 kwargs["language"] = language
 
             transcription = await self.client.audio.transcriptions.create(**kwargs)
             latency_ms = (time.perf_counter() - start_t) * 1000.0
             
+            clean_text = transcription.text.strip()
+            print(f"[GroqWhisper] Transcribed text: '{clean_text}' ({latency_ms:.2f}ms)")
+
             return {
-                "text": transcription.text.strip(),
+                "text": clean_text,
                 "latency_ms": latency_ms,
                 "model": self.model,
             }
