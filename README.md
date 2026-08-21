@@ -116,8 +116,6 @@ pip install -r requirements.txt
 ### 2. Configure Environment (`.env`)
 ```env
 GROQ_API_KEY=gsk_your_groq_key_here
-SARVAM_API_KEY=your_sarvam_key_here
-ELEVENLABS_API_KEY=your_elevenlabs_key_here
 STT_PROVIDER=mock
 GROQ_MODEL=allam-2-7b
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
