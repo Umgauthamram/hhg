@@ -1,6 +1,7 @@
 """
 Streaming Speech-to-Text (STT) Router & Factory.
 Routes audio streams to Sarvam AI, ElevenLabs, Groq Whisper LPU, or local Mock STT.
+Includes seamless automatic fallback to ensure zero transcription downtime.
 """
 
 from typing import AsyncGenerator, Dict, Any, Optional
@@ -15,6 +16,7 @@ class StreamingSTT:
     def __init__(self, provider: Optional[str] = None):
         self.provider_name = (provider or settings.STT_PROVIDER).lower()
         self.client: BaseSTT = self._initialize_client()
+        self.fallback_client: Optional[BaseSTT] = GroqWhisperSTT(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else MockSTT()
 
     def _initialize_client(self) -> BaseSTT:
         if self.provider_name == "sarvam" and settings.SARVAM_API_KEY:
@@ -33,11 +35,27 @@ class StreamingSTT:
         audio_stream: AsyncGenerator[bytes, None],
         language_code: str = "en",
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Routes audio stream to the configured STT engine."""
-        async for event in self.client.stream_audio_to_text(audio_stream, language_code=language_code):
+        """Routes audio stream to configured STT engine with automatic fallback."""
+        buffer = bytearray()
+        async for chunk in audio_stream:
+            buffer.extend(chunk)
+
+        async def cached_stream():
+            yield bytes(buffer)
+
+        # Attempt primary provider
+        primary_failed = False
+        async for event in self.client.stream_audio_to_text(cached_stream(), language_code=language_code):
+            if event.get("error") or not event.get("text"):
+                primary_failed = True
+                break
             yield event
 
+        # Failover to Whisper LPU if primary fails
+        if primary_failed and self.fallback_client:
+            async for fallback_event in self.fallback_client.stream_audio_to_text(cached_stream(), language_code=language_code):
+                yield fallback_event
+
 def get_stt_engine(provider: Optional[str] = None) -> BaseSTT:
-    """Helper factory returning the underlying STT engine instance."""
     stt = StreamingSTT(provider=provider)
     return stt.client

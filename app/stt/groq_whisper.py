@@ -37,7 +37,7 @@ class GroqWhisperSTT(BaseSTT):
                 "model": self.model,
                 "response_format": "json",
                 "temperature": 0.0,
-                "prompt": "What is a mobile phone? Explain photosynthesis in green plants. What is a corporation? What is a computer? Reserve Bank of India, technology, science, business.",
+                "prompt": "What is a mobile phone? What is a smartphone? Explain photosynthesis in green plants. What is a corporation? What is a computer? Tell me about the Reserve Bank of India. What is internet? Technology, biology, science, economics.",
             }
             if language and language not in ["auto", ""]:
                 kwargs["language"] = language
@@ -46,10 +46,13 @@ class GroqWhisperSTT(BaseSTT):
             latency_ms = (time.perf_counter() - start_t) * 1000.0
             
             clean_text = transcription.text.strip()
-            print(f"[GroqWhisper] Transcribed text: '{clean_text}' ({latency_ms:.2f}ms)")
+            # Clean trailing punctuation for natural search
+            searchable_text = clean_text.rstrip(".!?,")
+            print(f"[GroqWhisper] Transcribed: '{clean_text}' ({latency_ms:.2f}ms)")
 
             return {
                 "text": clean_text,
+                "searchable_text": searchable_text,
                 "latency_ms": latency_ms,
                 "model": self.model,
             }
