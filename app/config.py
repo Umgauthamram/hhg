@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "150"))
 
     # Vector & Retrieval Settings
-    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.30"))
     TOP_K: int = int(os.getenv("TOP_K", "3"))
     COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "msmarco_xi")

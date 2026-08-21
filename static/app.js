@@ -253,9 +253,10 @@ function stopRecording() {
 
 async function processVoiceAudio(audioBlob) {
   try {
+    const lang = document.getElementById("langSelect") ? document.getElementById("langSelect").value : "auto";
     const formData = new FormData();
     formData.append("file", audioBlob, "recording.webm");
-    formData.append("language", "en");
+    formData.append("language", lang);
 
     const res = await fetch("/api/voice-query", {
       method: "POST",
@@ -317,18 +318,19 @@ function sendQuery(text) {
   const query = text || textInput.value.trim();
   if (!query) return;
 
+  const lang = document.getElementById("langSelect") ? document.getElementById("langSelect").value : "auto";
   answerText.textContent = "";
   answerText.style.color = "#f1f5f9";
   cursorBlink.style.display = "inline-block";
   voiceStatus.textContent = `Query: "${query}"`;
 
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "query", text: query }));
+    ws.send(JSON.stringify({ type: "query", text: query, language: lang }));
   } else {
     fetch("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: query })
+      body: JSON.stringify({ query: query, language: lang })
     })
     .then(res => res.json())
     .then(data => {
