@@ -30,9 +30,10 @@ class HybridIndexer:
         self._tokenized_corpus: List[List[str]] = []
 
     def _tokenize(self, text: str) -> List[str]:
-        """Simple multilingual whitespace/punctuation tokenizer."""
+        """Multilingual whitespace/punctuation tokenizer."""
         clean = "".join(c.lower() if c.isalnum() else " " for c in text)
-        return [w for w in clean.split() if len(w) > 1]
+        stopwords = {"the", "a", "an", "is", "in", "to", "of", "and", "or", "that", "it", "this", "on", "for", "as", "with", "by", "are", "be", "what", "how", "who", "where", "when", "why"}
+        return [w for w in clean.split() if len(w) > 1 and w not in stopwords]
 
     def index_chunks(self, chunks: List[UnifiedChunk]) -> int:
         """
@@ -89,7 +90,8 @@ class HybridIndexer:
                     c = self._corpus_chunks[idx]
                     hits.append({
                         "id": c.chunk_id,
-                        "score": float(doc_scores[idx]),
+                        "bm25_score": float(doc_scores[idx]),
+                        "vector_score": 0.0,
                         "payload": {
                             "chunk_id": c.chunk_id,
                             "text": c.text,
@@ -101,7 +103,6 @@ class HybridIndexer:
                     })
             return hits
         else:
-            # Fallback lightweight TF-IDF keyword overlap scoring
             q_set = set(tokens)
             scores = []
             for idx, doc_tokens in enumerate(self._tokenized_corpus):
@@ -114,7 +115,8 @@ class HybridIndexer:
                     c = self._corpus_chunks[idx]
                     hits.append({
                         "id": c.chunk_id,
-                        "score": float(overlap),
+                        "bm25_score": float(overlap),
+                        "vector_score": 0.0,
                         "payload": {
                             "chunk_id": c.chunk_id,
                             "text": c.text,
@@ -130,7 +132,7 @@ class HybridIndexer:
         self,
         query: str,
         top_k: int = 3,
-        similarity_threshold: float = 0.35,
+        similarity_threshold: float = 0.30,
     ) -> tuple[List[Dict[str, Any]], float]:
         """
         Executes parallel dense + sparse retrieval and fuses results using Reciprocal Rank Fusion (RRF).
@@ -157,14 +159,24 @@ class HybridIndexer:
         for rank, hit in enumerate(dense_results):
             cid = hit["id"]
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (self.rrf_k + rank + 1))
-            doc_map[cid] = hit
+            doc_map[cid] = {
+                "vector_score": hit.get("score", 0.0),
+                "bm25_score": 0.0,
+                "payload": hit["payload"],
+            }
 
         # Process sparse ranks
         for rank, hit in enumerate(sparse_results):
             cid = hit["id"]
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (self.rrf_k + rank + 1))
             if cid not in doc_map:
-                doc_map[cid] = hit
+                doc_map[cid] = {
+                    "vector_score": 0.0,
+                    "bm25_score": hit.get("bm25_score", 0.0),
+                    "payload": hit["payload"],
+                }
+            else:
+                doc_map[cid]["bm25_score"] = hit.get("bm25_score", 0.0)
 
         # Sort by fused score
         sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:top_k]
@@ -175,7 +187,8 @@ class HybridIndexer:
             final_hits.append({
                 "chunk_id": cid,
                 "fused_score": rrf_scores[cid],
-                "vector_score": hit_data.get("score", 0.0),
+                "vector_score": hit_data.get("vector_score", 0.0),
+                "bm25_score": hit_data.get("bm25_score", 0.0),
                 "text": hit_data["payload"].get("text", ""),
                 "parent_context": hit_data["payload"].get("parent_context", ""),
                 "doc_id": hit_data["payload"].get("doc_id", ""),

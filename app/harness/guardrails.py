@@ -10,8 +10,9 @@ import re
 from typing import Tuple, List, Dict, Any
 
 class GuardrailEngine:
-    def __init__(self, min_confidence_score: float = 0.015):
-        self.min_confidence_score = min_confidence_score
+    def __init__(self, min_vector_score: float = 0.45, min_bm25_score: float = 2.0):
+        self.min_vector_score = min_vector_score
+        self.min_bm25_score = min_bm25_score
         
         # High-risk adversarial & prompt injection patterns
         self.injection_patterns = [
@@ -71,16 +72,18 @@ class GuardrailEngine:
         Evaluates whether the retrieved context contains sufficient confidence to answer the question.
         Returns (is_grounded: bool, reason: str).
         """
-        cutoff = threshold if threshold is not None else self.min_confidence_score
+        cutoff = threshold if threshold is not None else self.min_vector_score
 
         if not retrieved_chunks:
             return False, "No relevant context found in knowledge base."
 
         top_chunk = retrieved_chunks[0]
-        score = top_chunk.get("fused_score", top_chunk.get("score", 0.0))
+        v_score = top_chunk.get("vector_score", 0.0)
+        b_score = top_chunk.get("bm25_score", 0.0)
 
-        if score < cutoff:
-            return False, f"Retrieval confidence ({score:.4f}) is below the grounding threshold ({cutoff:.4f})."
+        # Grounded if either semantic vector similarity is strong or exact keyword BM25 score is strong
+        if v_score < cutoff and b_score < self.min_bm25_score:
+            return False, f"Retrieval confidence (vector: {v_score:.3f}, bm25: {b_score:.2f}) is below grounding threshold ({cutoff:.2f})."
 
         return True, ""
 
@@ -95,11 +98,9 @@ class GuardrailEngine:
         if "cannot find this information" in answer.lower() or "not in the provided records" in answer.lower():
             return True, 1.0
 
-        # Token overlap ratio
         ans_tokens = set(re.findall(r'\w+', answer.lower()))
         ctx_tokens = set(re.findall(r'\w+', context.lower()))
         
-        # Exclude stopwords
         stopwords = {"the", "a", "an", "is", "in", "to", "of", "and", "or", "that", "it", "this", "on", "for", "as", "with", "by", "are", "be"}
         filtered_ans = ans_tokens - stopwords
         
