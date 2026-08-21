@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "150"))
 
-    # Vector & Retrieval Settings
-    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-    SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.45"))
+    # Vector & Retrieval Settings (all-MiniLM-L6-v2 delivers ultra-fast ~11ms ONNX embedding)
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    SIMILARITY_THRESHOLD: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.30"))
     TOP_K: int = int(os.getenv("TOP_K", "3"))
     COLLECTION_NAME: str = os.getenv("COLLECTION_NAME", "msmarco_xi")
 
