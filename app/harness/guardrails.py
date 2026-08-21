@@ -10,7 +10,7 @@ import re
 from typing import Tuple, List, Dict, Any
 
 class GuardrailEngine:
-    def __init__(self, min_vector_score: float = 0.45, min_bm25_score: float = 2.0):
+    def __init__(self, min_vector_score: float = 0.35, min_bm25_score: float = 1.0):
         self.min_vector_score = min_vector_score
         self.min_bm25_score = min_bm25_score
         
@@ -43,7 +43,7 @@ class GuardrailEngine:
 
         cleaned = text.strip()
 
-        if len(cleaned) < 3:
+        if len(cleaned) < 2:
             return False, "Query is too short."
 
         if len(cleaned) > 800:
@@ -110,5 +110,5 @@ class GuardrailEngine:
         overlap = len(filtered_ans.intersection(ctx_tokens))
         overlap_ratio = overlap / len(filtered_ans)
 
-        is_grounded = overlap_ratio >= 0.30
+        is_grounded = overlap_ratio >= 0.20
         return is_grounded, overlap_ratio

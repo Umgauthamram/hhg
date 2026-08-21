@@ -130,9 +130,9 @@ python -u benchmark/benchmark_runner.py --count 25
 
 ### 4. Launch Live Web Application
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-Open **`http://localhost:8000`** in your browser to interact with the real-time audio waveform visualizer and live latency waterfall.
+Open **`http://localhost:8000`** or **`http://127.0.0.1:8000`** in your browser to interact with the real-time audio waveform visualizer and live latency waterfall.
 
 ---
 

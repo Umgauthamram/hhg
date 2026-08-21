@@ -1,71 +1,68 @@
 """
-FastAPI Application & WebSocket Server for Voice-Enabled Sub-200ms RAG System.
-Provides REST and real-time WebSocket endpoints for voice/text querying, latency tracking, and dataset management.
+FastAPI Server & Real-time WebSocket Gateway for Voice-Enabled Sub-200ms RAG.
+Features:
+- WebSocket endpoint /ws/voice-rag for low-latency token streaming and binary audio ingestion.
+- REST endpoints /api/query, /api/voice-query, /api/health, /api/benchmark/stats, /api/ingest.
+- Static file serving for the interactive dashboard.
 """
 
-import sys
 import os
-import time
+import sys
 import json
-import asyncio
+import time
+from typing import Optional
 from contextlib import asynccontextmanager
-from typing import Dict, Any, Optional
-
-# Set utf-8 output encoding
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app.config import settings
+from app.harness.orchestrator import RAGOrchestrator, RAGResponse
 from app.chunking.hybrid_indexer import HybridIndexer
 from app.llm.groq_client import LowLatencyLLM
 from app.stt.streaming_stt import StreamingSTT
 from app.harness.guardrails import GuardrailEngine
-from app.harness.orchestrator import RAGOrchestrator, RAGRequest, RAGResponse
 from dataset_ingest import MSMARCOXIngramIngester
+from app.config import settings
 
-# Global application state
+# Global shared pipeline instances
 orchestrator: Optional[RAGOrchestrator] = None
 ingester: Optional[MSMARCOXIngramIngester] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initializes in-memory components and loads MSMARCO-XI index on startup."""
     global orchestrator, ingester
+    startup_start = time.perf_counter()
     print("\n[Server Startup] Initializing Voice-Enabled RAG Sub-200ms Pipeline...")
-    start_init = time.perf_counter()
 
-    # 1. Initialize Hybrid Indexer (In-memory Qdrant + FastEmbed + BM25)
     indexer = HybridIndexer()
-
-    # 2. Ingest seed dataset into memory
     ingester = MSMARCOXIngramIngester(hybrid_indexer=indexer)
+
+    # 1. Load curated multi-lingual seed dataset
     ingester.ingest_curated_seed()
 
-    # Ingest a small live partition from HF MSMARCO-XI if available
+    # 2. Stream and index MSMARCO-XI from HuggingFace
     try:
         ingester.ingest_from_hf(languages=["hin"], limit_per_lang=10)
     except Exception as e:
-        print(f"[Server Startup] Warning: Could not download live HF partition ({e}). Using curated seed.")
+        print(f"[Server Startup] Warning: Online ingestion fallback: {e}")
 
-    # 3. Initialize Orchestrator
+    # 3. Initialize Orchestrator components
     llm = LowLatencyLLM()
     stt = StreamingSTT()
-    guardrails = GuardrailEngine()
-    
+    guardrail = GuardrailEngine()
+
     orchestrator = RAGOrchestrator(
         hybrid_indexer=indexer,
         llm_client=llm,
         stt_client=stt,
-        guardrail_engine=guardrails,
+        guardrail_engine=guardrail,
     )
 
-    init_ms = (time.perf_counter() - start_init) * 1000.0
-    print(f"[Server Startup] Pipeline initialized and ready in {init_ms:.2f}ms!\n")
+    startup_ms = (time.perf_counter() - startup_start) * 1000.0
+    print(f"[Server Startup] Pipeline initialized and ready in {startup_ms:.2f}ms!\n")
 
     yield
 
@@ -73,12 +70,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Voice-Enabled Sub-200ms RAG System",
-    description="Sub-200ms End-to-End Voice RAG pipeline for HH Goa 2026",
+    description="MSMARCO-XI Grounded Voice-First RAG API for HH Goa 2026",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# Enable CORS for web client access
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -87,34 +84,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure static folder exists
+# Mount static web assets
 static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
-os.makedirs(static_dir, exist_ok=True)
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-@app.get("/", response_class=HTMLResponse)
-async def serve_index():
-    """Serves the main web dashboard if index.html exists, otherwise simple HTML."""
-    index_file = os.path.join(static_dir, "index.html")
-    if os.path.exists(index_file):
-        return FileResponse(index_file)
-    return HTMLResponse("<h1>Voice-Enabled Sub-200ms RAG API Running</h1><p>Access /docs for API documentation.</p>")
+@app.get("/")
+async def get_index():
+    """Serves the primary web dashboard."""
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "Voice RAG API is live. Static UI not found."}
 
 @app.get("/api/health")
 async def health_check():
-    """Health and status endpoint."""
+    """System health check and pipeline status."""
     global orchestrator
     if not orchestrator:
-        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
-    
+        raise HTTPException(status_code=503, detail="Pipeline not initialized")
+
     return {
         "status": "healthy",
-        "vector_store_count": orchestrator.indexer.vector_store.count(),
-        "llm_model": orchestrator.llm.model_name,
-        "embedding_model": orchestrator.indexer.embedding_engine.model_name,
+        "vector_count": orchestrator.indexer.vector_store.client.count(
+            collection_name=settings.QDRANT_COLLECTION_NAME
+        ).count,
+        "llm_model": orchestrator.llm.model,
         "stt_provider": orchestrator.stt.provider_name,
         "timestamp": time.time(),
     }
+
+class RAGRequest(BaseModel):
+    query: str
+    language: str = Field(default="en")
+    top_k: int = Field(default=3)
 
 @app.post("/api/query", response_model=RAGResponse)
 async def query_rag(request: RAGRequest):
@@ -130,6 +133,25 @@ async def query_rag(request: RAGRequest):
         query=request.query,
         language=request.language,
         top_k=request.top_k,
+    )
+    return response
+
+@app.post("/api/voice-query", response_model=RAGResponse)
+async def query_voice_audio(
+    file: UploadFile = File(...),
+    language: str = Form(default="en"),
+    top_k: int = Form(default=3),
+):
+    """Transcribes uploaded microphone audio and streams RAG output."""
+    global orchestrator
+    if not orchestrator:
+        raise HTTPException(status_code=503, detail="Orchestrator not initialized")
+
+    audio_bytes = await file.read()
+    response = await orchestrator.execute_audio_query(
+        audio_bytes=audio_bytes,
+        language=language,
+        top_k=top_k,
     )
     return response
 
@@ -170,7 +192,6 @@ async def websocket_voice_rag(websocket: WebSocket):
 
     try:
         while True:
-            # Handle incoming message (can be text JSON or binary audio)
             message = await websocket.receive()
 
             if "text" in message:
@@ -189,7 +210,6 @@ async def websocket_voice_rag(websocket: WebSocket):
                         await websocket.send_json({"event": "error", "message": "Empty query received."})
                         continue
 
-                    # Stream text query response
                     async for event in orchestrator.execute_stream(
                         query=query_text,
                         language=language,
@@ -205,7 +225,6 @@ async def websocket_voice_rag(websocket: WebSocket):
                 audio_bytes = message["bytes"]
                 stt_start = time.perf_counter()
 
-                # Stream audio to STT engine
                 async def single_chunk_stream():
                     yield audio_bytes
 
@@ -229,7 +248,6 @@ async def websocket_voice_rag(websocket: WebSocket):
                         })
 
                 if final_text:
-                    # Stream RAG pipeline response
                     async for event in orchestrator.execute_stream(
                         query=final_text,
                         language=language,
@@ -244,7 +262,7 @@ async def websocket_voice_rag(websocket: WebSocket):
                     })
 
     except WebSocketDisconnect:
-        print("[WebSocket] Client disconnected.")
+        pass
     except Exception as e:
         print(f"[WebSocket] Error during session: {e}")
         try:

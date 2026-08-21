@@ -1,11 +1,13 @@
 /**
- * Voice-Enabled Sub-200ms RAG - Frontend Application Logic.
- * Web Audio API Analyser + WebSockets + Real-time Latency Waterfall Visualization.
+ * Voice-Enabled Sub-200ms RAG - Universal Audio & Voice Streamer.
+ * Uses MediaRecorder + Groq Whisper LPU backend STT for universal browser compatibility (Brave, Chrome, Safari, Firefox).
  */
 
 let ws = null;
 let audioContext = null;
 let mediaStream = null;
+let mediaRecorder = null;
+let audioChunks = [];
 let isRecording = false;
 let analyserNode = null;
 let animationFrameId = null;
@@ -57,7 +59,6 @@ function initWebSocket() {
   };
 
   ws.onclose = () => {
-    console.log("[WS] Disconnected. Reconnecting in 2s...");
     document.getElementById("serverStatus").textContent = "Reconnecting...";
     setTimeout(initWebSocket, 2000);
   };
@@ -91,8 +92,6 @@ function handleServerEvent(data) {
   } else if (event === "transcript_final") {
     voiceStatus.textContent = `Transcribed: "${data.text}"`;
     textInput.value = data.text;
-  } else if (event === "transcript_partial") {
-    voiceStatus.textContent = `Listening: "${data.text}"...`;
   }
 }
 
@@ -127,14 +126,14 @@ function renderSources(sources) {
     <div class="source-item">
       <div class="source-meta">
         <span>#${idx+1} [${s.language || 'en'}] ${s.doc_id || 'doc'}</span>
-        <span>Score: ${(s.score || 0).toFixed(4)}</span>
+        <span>Score: ${(s.score || s.fused_score || 0).toFixed(4)}</span>
       </div>
       <div class="source-text">${s.text || 'Grounded context match.'}</div>
     </div>
   `).join("");
 }
 
-// Audio Recording & Web Audio API Visualizer
+// MediaRecorder Audio Capture
 async function toggleRecording() {
   if (!isRecording) {
     startRecording();
@@ -145,45 +144,47 @@ async function toggleRecording() {
 
 async function startRecording() {
   try {
+    audioChunks = [];
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioContext.createMediaStreamSource(mediaStream);
     analyserNode = audioContext.createAnalyser();
     analyserNode.fftSize = 64;
     source.connect(analyserNode);
 
+    // Initialize MediaRecorder
+    let mimeType = "audio/webm";
+    if (!MediaRecorder.isTypeSupported("audio/webm")) {
+      mimeType = "audio/ogg";
+    }
+
+    mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mimeType });
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        audioChunks.push(e.data);
+      }
+    };
+
+    mediaRecorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunks, { type: mimeType });
+      await processVoiceAudio(audioBlob);
+    };
+
+    mediaRecorder.start(100);
     isRecording = true;
     micBtn.classList.add("recording");
     micWrapper.classList.add("recording");
-    voiceStatus.textContent = "Listening... Speak now";
+    voiceStatus.textContent = "🎙️ Listening to your voice... (Click mic button again when done speaking)";
     answerText.textContent = "";
     answerText.style.color = "#f1f5f9";
     cursorBlink.style.display = "inline-block";
 
     drawWaveform();
 
-    // Setup ScriptProcessor for audio chunk streaming
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    source.connect(processor);
-    processor.connect(audioContext.destination);
-
-    processor.onaudioprocess = (e) => {
-      if (!isRecording) return;
-      const inputData = e.inputBuffer.getChannelData(0);
-      // Convert float32 to int16 PCM
-      const pcm16 = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(pcm16.buffer);
-      }
-    };
-
   } catch (err) {
-    console.error("Microphone access denied:", err);
-    voiceStatus.textContent = "Microphone access denied. You can use keyboard input.";
+    console.error("Microphone access error:", err);
+    voiceStatus.textContent = "Microphone permission required. You can also type your question below.";
   }
 }
 
@@ -191,7 +192,11 @@ function stopRecording() {
   isRecording = false;
   micBtn.classList.remove("recording");
   micWrapper.classList.remove("recording");
-  voiceStatus.textContent = "Processing audio stream...";
+  voiceStatus.textContent = "Transcribing voice via Groq Whisper LPU...";
+
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
 
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
@@ -203,6 +208,37 @@ function stopRecording() {
     cancelAnimationFrame(animationFrameId);
   }
   clearCanvas();
+}
+
+async function processVoiceAudio(audioBlob) {
+  try {
+    const formData = new FormData();
+    formData.append("file", audioBlob, "recording.webm");
+    formData.append("language", "en");
+
+    const res = await fetch("/api/voice-query", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Server returned ${res.status}`);
+    }
+
+    const data = await res.json();
+    textInput.value = data.query || "";
+    voiceStatus.textContent = `Transcribed: "${data.query}"`;
+    cursorBlink.style.display = "none";
+    answerText.textContent = data.answer;
+    updateLatencyBadges(data.latency);
+    renderSources(data.sources || []);
+    fetchBenchmarkStats();
+
+  } catch (err) {
+    console.error("Voice query failed:", err);
+    voiceStatus.textContent = "Could not process audio. Please try again or type below.";
+    cursorBlink.style.display = "none";
+  }
 }
 
 function drawWaveform() {
@@ -248,7 +284,6 @@ function sendQuery(text) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "query", text: query }));
   } else {
-    // Fallback REST call if WebSocket is connecting
     fetch("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -262,8 +297,6 @@ function sendQuery(text) {
       renderSources(data.sources);
     });
   }
-
-  textInput.value = "";
 }
 
 // Fetch Benchmark Percentile Statistics
@@ -289,6 +322,7 @@ function setupQuickSamples() {
   document.querySelectorAll(".sample-chip").forEach(chip => {
     chip.addEventListener("click", () => {
       const q = chip.getAttribute("data-query");
+      textInput.value = q;
       sendQuery(q);
     });
   });

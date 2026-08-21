@@ -1,23 +1,24 @@
 """
-Structured Orchestration Harness for Voice-Enabled Sub-200ms RAG.
-Orchestrates: STT -> Input Guardrails -> Hybrid Retrieval -> Grounding Gate -> Groq LLM -> Output Verification.
+End-to-End Voice RAG Pipeline Orchestrator & Harness.
+Connects: STT -> Input Guardrails -> Hybrid Retrieval -> Grounding Gate -> Low-Latency LLM Streaming.
+Tracks per-node microsecond latency breakdowns and percentile distributions.
 """
 
 import time
 import asyncio
-from typing import AsyncGenerator, Dict, Any, Optional, List
+from typing import AsyncGenerator, Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
-from app.harness.guardrails import GuardrailEngine
-from app.harness.latency_tracker import LatencyTracker, LatencyBreakdown
 from app.chunking.hybrid_indexer import HybridIndexer
 from app.llm.groq_client import LowLatencyLLM
 from app.stt.streaming_stt import StreamingSTT
+from app.harness.guardrails import GuardrailEngine
+from app.harness.latency_tracker import LatencyTracker, LatencyBreakdown
 from app.config import settings
 
 class RAGRequest(BaseModel):
-    query: Optional[str] = None
-    language: str = "en"
+    query: str
+    language: str = Field(default="en")
     top_k: int = Field(default=3)
 
 class RAGResponse(BaseModel):
@@ -25,7 +26,7 @@ class RAGResponse(BaseModel):
     answer: str
     is_safe: bool = True
     is_grounded: bool = True
-    refusal_reason: Optional[str] = None
+    refusal_reason: str = ""
     latency: LatencyBreakdown
     sources: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -43,21 +44,25 @@ class RAGOrchestrator:
         self.guardrail = guardrail_engine or GuardrailEngine()
         self.latency_tracker = LatencyTracker()
 
-    async def execute_query(self, query: str, language: str = "en", top_k: int = 3) -> RAGResponse:
+    async def execute_query(
+        self,
+        query: str,
+        language: str = "en",
+        top_k: int = 3,
+    ) -> RAGResponse:
         """
-        Executes complete RAG pipeline synchronously (for REST / Benchmark) and returns structured RAGResponse.
+        Synchronous / non-streaming execution with full latency breakdown.
         """
         pipeline_start = time.perf_counter()
         breakdown = LatencyBreakdown()
 
-        # 1. Input Guardrail Verification
+        # 1. Input Guardrail
         g_start = time.perf_counter()
         is_safe, refusal_reason = self.guardrail.validate_input(query)
         breakdown.guardrail_ms = (time.perf_counter() - g_start) * 1000.0
 
         if not is_safe:
             breakdown.total_pipeline_ms = (time.perf_counter() - pipeline_start) * 1000.0
-            self.latency_tracker.record(breakdown)
             return RAGResponse(
                 query=query,
                 answer=f"I cannot process this request: {refusal_reason}",
@@ -68,7 +73,7 @@ class RAGOrchestrator:
                 sources=[],
             )
 
-        # 2. Hybrid Retrieval (Qdrant + BM25)
+        # 2. Hybrid Retrieval
         retrieved_docs, retrieval_ms = self.indexer.search_hybrid(query, top_k=top_k)
         breakdown.retrieval_ms = retrieval_ms
 
@@ -76,7 +81,6 @@ class RAGOrchestrator:
         is_grounded, ground_reason = self.guardrail.validate_retrieval_grounding(retrieved_docs)
         if not is_grounded:
             breakdown.total_pipeline_ms = (time.perf_counter() - pipeline_start) * 1000.0
-            self.latency_tracker.record(breakdown)
             return RAGResponse(
                 query=query,
                 answer="I cannot find this information in the provided records.",
@@ -116,6 +120,41 @@ class RAGOrchestrator:
             ],
         )
 
+    async def execute_audio_query(
+        self,
+        audio_bytes: bytes,
+        language: str = "en",
+        top_k: int = 3,
+    ) -> RAGResponse:
+        """
+        Transcribes raw audio bytes and processes through RAG pipeline.
+        """
+        start_t = time.perf_counter()
+        
+        async def single_chunk_gen():
+            yield audio_bytes
+
+        transcribed_text = ""
+        stt_latency = 0.0
+        async for evt in self.stt.transcribe_stream(single_chunk_gen(), language_code=language):
+            if evt.get("is_final"):
+                transcribed_text = evt.get("text", "")
+                stt_latency = evt.get("latency_ms", (time.perf_counter() - start_t) * 1000.0)
+
+        if not transcribed_text:
+            return RAGResponse(
+                query="",
+                answer="Could not transcribe audio.",
+                is_safe=True,
+                is_grounded=False,
+                latency=LatencyBreakdown(stt_ms=stt_latency, total_pipeline_ms=(time.perf_counter() - start_t) * 1000.0)
+            )
+
+        resp = await self.execute_query(query=transcribed_text, language=language, top_k=top_k)
+        resp.latency.stt_ms = stt_latency
+        resp.latency.total_pipeline_ms += stt_latency
+        return resp
+
     async def execute_stream(
         self,
         query: str,
@@ -138,8 +177,7 @@ class RAGOrchestrator:
             breakdown.total_pipeline_ms = (time.perf_counter() - pipeline_start) * 1000.0 + stt_latency_ms
             yield {
                 "event": "error",
-                "token": f"Security Notice: {refusal_reason}",
-                "is_done": True,
+                "token": f"I cannot process this request: {refusal_reason}",
                 "is_safe": False,
                 "is_grounded": False,
                 "latency": breakdown.model_dump(),
@@ -157,22 +195,23 @@ class RAGOrchestrator:
             yield {
                 "event": "grounding_rejection",
                 "token": "I cannot find this information in the provided records.",
-                "is_done": True,
                 "is_safe": True,
                 "is_grounded": False,
-                "refusal_reason": ground_reason,
+                "reason": ground_reason,
                 "latency": breakdown.model_dump(),
+                "sources": [],
             }
             return
 
-        # 4. Stream LLM Tokens
+        # 4. Stream LLM Response
         context_text = "\n---\n".join([
             d.get("parent_context") or d.get("text", "") for d in retrieved_docs
         ])
 
         async for chunk in self.llm.generate_stream(query=query, context=context_text):
             if chunk["is_first"]:
-                breakdown.llm_ttft_ms = (time.perf_counter() - pipeline_start) * 1000.0 + stt_latency_ms
+                breakdown.llm_ttft_ms = chunk["ttft_ms"]
+                breakdown.total_pipeline_ms = (time.perf_counter() - pipeline_start) * 1000.0 + stt_latency_ms
                 yield {
                     "event": "token",
                     "token": chunk["token"],

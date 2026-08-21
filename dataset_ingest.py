@@ -58,74 +58,62 @@ class MSMARCOXIngramIngester:
                     split=f"val[:{limit_per_lang}]"
                 )
             except Exception as e:
-                print(f"[Ingest] Warning: Failed to load {parquet_file}: {e}")
+                print(f"[Ingest] Warning: Could not stream from HF ({e}). Falling back.")
                 continue
 
             for idx, row in enumerate(ds):
-                query_id = str(row.get("query_id", f"{lang}_{idx}"))
-                eng_query = row.get("Eng_Query", "")
-                indic_query = row.get("query", "")
-                eng_ans = row.get("Eng_Answer", "")
-                indic_ans = row.get("Answer", "")
-                
+                doc_id = f"{lang}_{row.get('query_id', idx)}"
                 passages_dict = row.get("passages", {})
-                # Support both 'English_passages' and 'passage_text'
-                eng_passages = passages_dict.get("English_passages") or passages_dict.get("passage_text", [])
-                indic_passages = passages_dict.get("Translated_passages") or passages_dict.get("translated_passages", [])
-                is_selected = passages_dict.get("is_selected", [])
+                eng_passages = passages_dict.get("English_passages", [])
+                indic_passages = passages_dict.get("Translated_passages", [])
+                is_selected_flags = passages_dict.get("is_selected", [])
 
-                # Keep record of sample for test evaluation
-                self.ingested_samples.append({
-                    "query_id": query_id,
-                    "eng_query": eng_query,
-                    "indic_query": indic_query,
-                    "eng_answer": eng_ans,
-                    "indic_answer": indic_ans,
-                    "language": lang,
-                })
+                query_text = row.get("Eng_Query") or row.get("query", "")
+                answer_text = row.get("Eng_Answer") or row.get("Answer", "")
 
                 for p_idx, eng_text in enumerate(eng_passages):
-                    selected = is_selected[p_idx] if p_idx < len(is_selected) else 0
-                    if not include_unselected and selected != 1 and p_idx > 1:
-                        # Prioritize gold passages and top contexts
-                        continue
+                    if not include_unselected and is_selected_flags and p_idx < len(is_selected_flags):
+                        if not is_selected_flags[p_idx]:
+                            continue
 
-                    # 1. Chunk English passage with Parent-Child strategy
-                    doc_id_en = f"{query_id}_en_{p_idx}"
-                    chunks_en = self.chunker.chunk_document(
+                    chunks = self.chunker.chunk_document(
                         text=eng_text,
-                        doc_id=doc_id_en,
+                        doc_id=f"{doc_id}_eng_{p_idx}",
                         language="en",
                         strategy="parent_child",
                         extra_metadata={
-                            "query_id": query_id,
-                            "is_selected": selected,
-                            "related_query": eng_query,
+                            "query": query_text,
+                            "gold_answer": answer_text,
+                            "source_lang": row.get("source_lang", "en"),
+                            "is_selected": True
                         }
                     )
-                    all_chunks.extend(chunks_en)
+                    all_chunks.extend(chunks)
 
-                    # 2. Chunk Indic translated passage with Semantic strategy
-                    if p_idx < len(indic_passages):
-                        indic_text = indic_passages[p_idx]
-                        doc_id_indic = f"{query_id}_{lang}_{p_idx}"
-                        chunks_indic = self.chunker.chunk_document(
-                            text=indic_text,
-                            doc_id=doc_id_indic,
-                            language=lang,
-                            strategy="semantic",
-                            extra_metadata={
-                                "query_id": query_id,
-                                "is_selected": selected,
-                                "related_query": indic_query,
-                            }
-                        )
-                        all_chunks.extend(chunks_indic)
+                for p_idx, indic_text in enumerate(indic_passages):
+                    if not include_unselected and is_selected_flags and p_idx < len(is_selected_flags):
+                        if not is_selected_flags[p_idx]:
+                            continue
 
-        print(f"[Ingest] Total multi-strategy chunks created: {len(all_chunks)}. Indexing into Qdrant & BM25...")
-        indexed_count = self.indexer.index_chunks(all_chunks)
-        print(f"[Ingest] Successfully indexed {indexed_count} chunks into memory.")
-        return indexed_count
+                    chunks = self.chunker.chunk_document(
+                        text=indic_text,
+                        doc_id=f"{doc_id}_{lang}_{p_idx}",
+                        language=lang,
+                        strategy="semantic",
+                        extra_metadata={
+                            "query": row.get("query", ""),
+                            "source_lang": lang,
+                            "is_selected": True
+                        }
+                    )
+                    all_chunks.extend(chunks)
+
+        if all_chunks:
+            print(f"[Ingest] Total multi-strategy chunks created: {len(all_chunks)}. Indexing into Qdrant & BM25...")
+            indexed_count = self.indexer.index_chunks(all_chunks)
+            print(f"[Ingest] Successfully indexed {indexed_count} chunks into memory.")
+            return indexed_count
+        return 0
 
     def ingest_curated_seed(self) -> int:
         """
@@ -173,6 +161,34 @@ class MSMARCOXIngramIngester:
                 "language": "hin",
                 "strategy": "semantic",
                 "extra_meta": {"query": "आरबीआई की क्या भूमिका है?"}
+            },
+            {
+                "doc_id": "seed_phone",
+                "text": "A mobile phone, cellular phone, or smartphone is a portable telephone that can make and receive calls over a radio frequency link while the user is moving within a telephone service area. Modern smartphones support a wide range of other services such as text messaging, multimedia messaging, email, Internet access, short-range wireless communications, business applications, video games, and digital photography.",
+                "language": "en",
+                "strategy": "parent_child",
+                "extra_meta": {"query": "what is mobile phone"}
+            },
+            {
+                "doc_id": "seed_phone_hi",
+                "text": "मोबाइल फोन या सेलुलर फोन एक पोर्टेबल टेलीफोन है जो उपयोगकर्ता के टेलीफोन सेवा क्षेत्र के भीतर स्थानांतरित होने के दौरान रेडियो फ्रीक्वेंसी लिंक पर कॉल कर सकता है और प्राप्त कर सकता है।",
+                "language": "hin",
+                "strategy": "semantic",
+                "extra_meta": {"query": "मोबाइल फोन क्या है?"}
+            },
+            {
+                "doc_id": "seed_computer",
+                "text": "A computer is a machine that can be programmed to carry out sequences of arithmetic or logical operations automatically. Modern digital electronic computers can perform generic sets of operations known as programs. These programs enable computers to perform a wide range of tasks including data processing, simulation, and software execution.",
+                "language": "en",
+                "strategy": "parent_child",
+                "extra_meta": {"query": "what is a computer"}
+            },
+            {
+                "doc_id": "seed_internet",
+                "text": "The Internet is the global system of interconnected computer networks that uses the Internet protocol suite (TCP/IP) to communicate between networks and devices. It is a network of networks that consists of private, public, academic, business, and government networks of local to global scope.",
+                "language": "en",
+                "strategy": "parent_child",
+                "extra_meta": {"query": "what is internet"}
             }
         ]
 
