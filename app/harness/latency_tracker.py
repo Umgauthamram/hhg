@@ -26,7 +26,7 @@ class LatencyTracker:
         """Appends a new latency measurement."""
         self.records.append(breakdown)
 
-    def get_percentiles(self) -> Dict[str, Dict[str, float]]:
+    def get_percentiles(self) -> Dict[str, Any]:
         """
         Computes P50 (Median), P70, P90, and P100 (Worst Case) metrics across all runs.
         """
@@ -36,6 +36,7 @@ class LatencyTracker:
                 "P70": {"total_ms": 0.0, "retrieval_ms": 0.0, "llm_ttft_ms": 0.0, "stt_ms": 0.0},
                 "P90": {"total_ms": 0.0, "retrieval_ms": 0.0, "llm_ttft_ms": 0.0, "stt_ms": 0.0},
                 "P100": {"total_ms": 0.0, "retrieval_ms": 0.0, "llm_ttft_ms": 0.0, "stt_ms": 0.0},
+                "sample_count": 0,
             }
 
         totals = [r.total_pipeline_ms for r in self.records]
